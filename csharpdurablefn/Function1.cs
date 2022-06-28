@@ -32,20 +32,14 @@ namespace csharpdurablefn
         {
             TimeSpan timeout = TimeSpan.FromSeconds(120);
             DateTime deadline = context.CurrentUtcDateTime.Add(timeout);
-
-            //outputs.Add(await context.CallActivityAsync<string>("Function1_Hello", "Tokyo"));
             var cts = new CancellationTokenSource();
 
             Task<List<ExportControl>> activityTask = context.CallActivityAsync<List<ExportControl>>("FetchCosmosDB", null);
-            //activityTask2...
             Task timeoutTask = context.CreateTimer(deadline, cts.Token);
-
             Task winner = await Task.WhenAny(activityTask, timeoutTask);
 
             if (winner == activityTask)
             {
-                log.LogInformation(activityTask.Result.Count().ToString());
-                //success
                 cts.Cancel();
             }
             else
@@ -55,7 +49,14 @@ namespace csharpdurablefn
             }
 
             //create an activity function that fans out for each export control in list that we get from cosmosDb activity function
+
+            foreach (var control in activityTask.Result)
+            {
+                string name = await context.CallSubOrchestratorAsync<string>("ConsumerSubOrchestration", control);
+            }
+            /*
             var parallelTasks = new List<Task<string>>();
+
             // Get a list of N work items to process in parallel.
             for (int i = 0; i < activityTask.Result.Count(); i++)
             {
@@ -68,13 +69,50 @@ namespace csharpdurablefn
             {
                 //Print out connection names after aggregating results
                 log.LogInformation(control.Result);
+            }*/
+        }
+
+        [FunctionName("ConsumerSubOrchestration")]
+        public static async Task<string> ConsumerSubOrchestration(
+            [OrchestrationTrigger] IDurableOrchestrationContext context)
+        {
+            ExportControl control = context.GetInput<ExportControl>();
+            string name = await context.CallActivityAsync<string>("Consumer", control);
+
+            //implement cancellation token 
+            TimeSpan timeout = TimeSpan.FromSeconds(10);
+            DateTime deadline = context.CurrentUtcDateTime.Add(timeout);
+            var cts = new CancellationTokenSource();
+
+            Task activityTask = context.CallActivityAsync<Task>("TimeoutTest", control);
+            Task timeoutTask = context.CreateTimer(deadline, cts.Token);
+            Task winner = await Task.WhenAny(activityTask, timeoutTask);
+            if (winner == activityTask)
+            {
+                // success case
+                cts.Cancel();
+                return name;
+            }
+            else
+            {
+                // timeout case
+                throw new TimeoutException();
             }
         }
 
         [FunctionName("Consumer")]
         public static string FetchContentViaAPI([ActivityTrigger] ExportControl exportControl, ILogger log)
         {
+            log.LogInformation("Proccessed " + exportControl.ConnectionName);
             return exportControl.ConnectionName;
+        }
+
+        [FunctionName("TimeoutTest")]
+        public static async Task TimeoutAsync([ActivityTrigger] ExportControl exportControl, ILogger log)
+        {
+            log.LogInformation("Delay starting at " + DateTime.Now);
+            await Task.Delay(2000);
+            log.LogInformation("Finished delay at " + DateTime.Now);
         }
 
         [FunctionName("FetchCosmosDB")]
@@ -86,7 +124,6 @@ namespace csharpdurablefn
             return exportControls;
         }
 
-        //This should be the scheduler 
         [FunctionName("ScheduledStart")]
         public static async Task RunScheduled(
             [TimerTrigger("0 */2 * * * *")] TimerInfo timerInfo,
@@ -99,10 +136,6 @@ namespace csharpdurablefn
             }
 
             log.LogInformation($"C# Timer trigger function executed at: {DateTime.Now}");
-
-            //get all export connections that need to be run in the next 5 minutes 
-            //Container container = await GetContainerAsync();
-            //List<ExportControl> exportControls = await GetAllExportControls(container, log);
 
             string instanceId = await starter.StartNewAsync("Function1", null);
             log.LogInformation($"Started orchestration with ID = '{instanceId}'.");
@@ -125,7 +158,6 @@ namespace csharpdurablefn
             }
             return exportControls;
         }
-
         public static async Task<Container> GetContainerAsync()
         {
             CosmosClient client = new CosmosClient(
@@ -140,7 +172,6 @@ namespace csharpdurablefn
                 partitionKeyPath: "/WorkspaceId",
                 throughput: 400
             );
-
             return container;
         }
     }
